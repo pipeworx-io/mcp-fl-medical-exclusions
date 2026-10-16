@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-fl-medical-exclusions",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Florida AHCA Medicaid Sanctioned Providers screening — check a provider name, NPI, Florida license number or Medicaid provider number against the Agency for Health Care Administration's Medicaid sanction final orders (suspensions, terminations, fines and corrective action plans), the state-level…",
   "type": "module",
   "main": "src/index.ts",
@@ -26,7 +26,7 @@
     "@cloudflare/workers-types": "^4.20260405.1"
   },
   "pipeworx": {
-    "sourceHash": "v1-641c42085a94afd447e3b59abf355c5a748255f994aaea14a168c9631df72d7c",
-    "sourceCommit": "3723e46c6d115bd4a1fd2175e6bf758555e7cb50"
+    "sourceHash": "v1-3abb8577cb009d98a3ee6a5f493f32b56568b0ae6ba94af4e8a5c763f4a2b611",
+    "sourceCommit": "a03f96ed672b8c149593c64ecbf30280cabf084c"
   }
 }

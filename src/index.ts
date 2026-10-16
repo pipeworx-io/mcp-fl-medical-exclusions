@@ -25,6 +25,112 @@ interface McpToolExport {
 }
 
 /**
+ * Shared "count records by a named date field over a year or range" helper —
+ * fleet #3170.
+ *
+ * WHY THIS EXISTS. Four baked-table packs (ny-omig-exclusions,
+ * tx-medical-exclusions, ca-medical-exclusions, fl-medical-exclusions) each
+ * hold thousands of rows and each had only a list-wide total — no way to
+ * answer "how many took effect in year Y" without a caller paging through
+ * every row itself. A benchmark probe (fleet #3170/#3149) asked exactly that
+ * question against two of them and both returned the SAME list-wide total on
+ * every one of 7-8 rounds; the model ran out of rounds and refused rather
+ * than get a wrong number. This is the one piece of that fix every pack
+ * shares: parsing `year` or `start_date`/`end_date` into an inclusive
+ * YYYY-MM-DD range, or a NAMED reason when the input can't be turned into
+ * one. It deliberately never returns a silent zero for a bad argument —
+ * root CLAUDE.md's silent-zero policy applies to a malformed count request
+ * exactly as it does to an upstream outage.
+ *
+ * WHAT IT DOES NOT DO. It does not touch the rows — each pack's own ISO date
+ * field (already YYYY-MM-DD in every one of these four) is filtered by plain
+ * string comparison, which is correct for YYYY-MM-DD strings and avoids a
+ * Date() parse / timezone trap entirely. Each pack is responsible for saying
+ * which of its own fields it counted (data varies: NY/TX/CA have exactly one
+ * exclusion-date field each; FL additionally splits "all sanction orders" vs
+ * "participation exclusions" within the matched range).
+ */
+
+interface DateRange {
+  /** Inclusive start date, YYYY-MM-DD. */
+  start: string;
+  /** Inclusive end date, YYYY-MM-DD. */
+  end: string;
+  /** Human label for the range, e.g. "2025" or "2024-06-01 to 2025-06-01". */
+  label: string;
+}
+
+interface DateRangeError {
+  error: string;
+}
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Reads `args.year`, `args.start_date` and `args.end_date` and returns:
+ *   - `null` if none were passed (no date-range count was requested at all —
+ *     the caller should fall through to its normal, non-counting response);
+ *   - `{ error }` if something WAS passed but can't be turned into a valid
+ *     range (bad format, start after end, year out of a sane bound) — the
+ *     caller must surface this as a named reason, never as a zero count;
+ *   - `{ start, end, label }` otherwise.
+ *
+ * start_date/end_date, if either is present, take precedence over `year`
+ * (an explicit range is a more specific request than a calendar year).
+ */
+function parseYearOrDateRange(args: Record<string, unknown>): DateRange | DateRangeError | null {
+  const startRaw = typeof args.start_date === 'string' ? args.start_date.trim() : '';
+  const endRaw = typeof args.end_date === 'string' ? args.end_date.trim() : '';
+  const yearRaw = args.year;
+  const yearGiven = yearRaw !== undefined && yearRaw !== null && yearRaw !== '';
+
+  if (!startRaw && !endRaw && !yearGiven) return null;
+
+  if (startRaw || endRaw) {
+    if (!DATE_RE.test(startRaw) || !DATE_RE.test(endRaw)) {
+      return {
+        error:
+          `start_date and end_date must BOTH be present and in YYYY-MM-DD form ` +
+          `(got start_date=${startRaw ? JSON.stringify(startRaw) : '(missing)'}, end_date=${endRaw ? JSON.stringify(endRaw) : '(missing)'}).`,
+      };
+    }
+    if (startRaw > endRaw) {
+      return { error: `start_date (${startRaw}) is after end_date (${endRaw}).` };
+    }
+    return { start: startRaw, end: endRaw, label: startRaw === endRaw ? startRaw : `${startRaw} to ${endRaw}` };
+  }
+
+  const year = Math.floor(Number(yearRaw));
+  if (!Number.isFinite(year) || year < 1900 || year > 2100) {
+    return { error: `year must be a 4-digit calendar year between 1900 and 2100 (got ${JSON.stringify(yearRaw)}).` };
+  }
+  return { start: `${year}-01-01`, end: `${year}-12-31`, label: String(year) };
+}
+
+function isDateRangeError(r: DateRange | DateRangeError | null): r is DateRangeError {
+  return r != null && typeof (r as DateRangeError).error === 'string';
+}
+
+/** Inclusive YYYY-MM-DD membership test; `null`/empty dates never match. */
+function inRange(date: string | null | undefined, range: DateRange): boolean {
+  return Boolean(date) && (date as string) >= range.start && (date as string) <= range.end;
+}
+
+const DATE_RANGE_ARG_SCHEMA = {
+  year: {
+    type: 'number' as const,
+    description: 'Count records whose date field falls in this calendar year (e.g. 2025), counted over the WHOLE list, not a page. Ignored if start_date/end_date are given.',
+  },
+  start_date: {
+    type: 'string' as const,
+    description: 'Inclusive range start, YYYY-MM-DD. Use with end_date for a custom date range instead of a calendar year.',
+  },
+  end_date: {
+    type: 'string' as const,
+    description: 'Inclusive range end, YYYY-MM-DD. Use with start_date for a custom date range instead of a calendar year.',
+  },
+};
+/**
  * Florida AHCA Medicaid Sanctioned Providers screening — check a provider
  * name, NPI, Florida license number or Medicaid provider number against the
  * Agency for Health Care Administration's Medicaid sanction final orders
@@ -388,7 +494,7 @@ async function checkExclusion(args: Record<string, unknown>) {
   };
 }
 
-async function coverage() {
+async function coverage(args: Record<string, unknown>) {
   const byClass: Record<string, number> = {};
   for (const r of ROWS) byClass[r.sanction_class] = (byClass[r.sanction_class] ?? 0) + 1;
   const exclusions = ROWS.filter((r) => EXCLUSION_CLASSES.has(r.sanction_class as SanctionClass));
@@ -398,6 +504,47 @@ async function coverage() {
   const providerTypes = new Set(ROWS.map((r) => r.provider_type).filter(Boolean));
   const codes: Record<string, number> = {};
   for (const r of ROWS) for (const c of r.violation_codes) codes[c] = (codes[c] ?? 0) + 1;
+
+  // fleet #3170: count-by-date-range mode. Unlike the other three state
+  // packs, FL's list is one row per sanction FINAL ORDER and most orders are
+  // fines/CAPs, not exclusions (see EXCLUSION_VS_SANCTION_CAVEAT) — so a
+  // date-range count here headlines PARTICIPATION EXCLUSIONS (suspension +
+  // termination) in range, and separately reports all sanction orders in
+  // range for context, rather than conflating the two under one "exclusions"
+  // number the way a naive port of the other three packs would.
+  const range = parseYearOrDateRange(args);
+  if (isDateRangeError(range)) {
+    return {
+      found: false,
+      reason: 'invalid_date_range',
+      hint: range.error,
+      source: SOURCE_LABEL,
+      source_url: SOURCE_URL,
+      data_as_of: DATA_AS_OF,
+    };
+  }
+  if (range) {
+    const ordersInRange = ROWS.filter((r) => inRange(r.sanction_date, range));
+    const exclusionsInRange = ordersInRange.filter((r) => EXCLUSION_CLASSES.has(r.sanction_class as SanctionClass));
+    return {
+      found: true,
+      mode: 'date_range_count',
+      participation_exclusion_count: exclusionsInRange.length,
+      all_sanction_orders_count: ordersInRange.length,
+      date_field_counted: 'sanction_date — the final order\'s sanction date',
+      range: { start: range.start, end: range.end, label: range.label },
+      counted_over: 'the whole list (7,000+ rows), not a page',
+      exclusion_vs_sanction_caveat: EXCLUSION_VS_SANCTION_CAVEAT,
+      total_sanction_orders_all_time: TOTAL_ROWS,
+      participation_exclusion_orders_all_time: exclusions.length,
+      oldest_sanction_date: dates[0] ?? null,
+      newest_sanction_date: dates[dates.length - 1] ?? null,
+      data_as_of: DATA_AS_OF,
+      index_captured_at: CAPTURED_AT,
+      source: SOURCE_LABEL,
+      source_url: SOURCE_URL,
+    };
+  }
 
   return {
     found: true,
@@ -448,8 +595,9 @@ const tools: McpToolExport['tools'] = [
   {
     name: 'fl_medical_exclusion_coverage',
     description:
-      'What the Florida AHCA Medicaid Sanctioned Providers data covers and how current it is: total sanction final orders, how many are participation exclusions (suspensions/terminations) vs. fines and corrective action plans, distinct providers, how many orders carry an NPI, license or Medicaid provider number, the violation-code counts with AHCA\'s published key, the oldest and newest sanction dates, and when this pack\'s copy was captured. Use to check the screening data is fresh enough to rely on before a compliance decision, and to read the notes on the sanction-vs-exclusion distinction and the derived end dates. Sourced from AHCA\'s Public Records final-orders search, keyless.',
-    inputSchema: { type: 'object' as const, properties: {} },
+      'What the Florida AHCA Medicaid Sanctioned Providers data covers and how current it is: total sanction final orders, how many are participation exclusions (suspensions/terminations) vs. fines and corrective action plans, distinct providers, how many orders carry an NPI, license or Medicaid provider number, the violation-code counts with AHCA\'s published key, the oldest and newest sanction dates, and when this pack\'s copy was captured. Use to check the screening data is fresh enough to rely on before a compliance decision, and to read the notes on the sanction-vs-exclusion distinction and the derived end dates. '
+      + 'Pass year (e.g. 2025) or start_date/end_date to instead COUNT orders by sanction_date in that year or range, counted over the whole 7,000+ row list, not a page — answers "how many Florida Medicaid exclusions took effect in 2025". Returns participation_exclusion_count (suspensions + terminations only — the real exclusions) separately from all_sanction_orders_count (which also includes fines/CAPs, not exclusions); the response says which is which. Sourced from AHCA\'s Public Records final-orders search, keyless.',
+    inputSchema: { type: 'object' as const, properties: { ...DATE_RANGE_ARG_SCHEMA } },
   },
 ];
 
@@ -459,7 +607,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
     case 'fl_medical_check_exclusion':
       return checkExclusion(args);
     case 'fl_medical_exclusion_coverage':
-      return coverage();
+      return coverage(args);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
