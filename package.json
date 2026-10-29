@@ -1,12 +1,20 @@
 {
   "name": "@pipeworx/mcp-fl-medical-exclusions",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Florida AHCA Medicaid Sanctioned Providers screening — check a provider name, NPI, Florida license number or Medicaid provider number against the Agency for Health Care Administration's Medicaid sanction final orders (suspensions, terminations, fines and corrective action plans), the state-level…",
   "type": "module",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./tools.json": "./tools.json",
+    "./package.json": "./package.json"
+  },
   "bin": {
     "mcp-fl-medical-exclusions": "bin/cli.js"
+  },
+  "files": ["bin/", "lib/", "tools.json", "server.json"],
+  "engines": {
+    "node": ">=18"
   },
   "keywords": ["mcp", "mcp-server", "model-context-protocol", "pipeworx", "fl-medical-exclusions"],
   "license": "MIT",
@@ -14,19 +22,12 @@
     "type": "git",
     "url": "git+https://github.com/pipeworx-io/mcp-fl-medical-exclusions.git"
   },
-  "scripts": {
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "tsx": "^4.19.0"
-  },
-  "devDependencies": {
-    "typescript": "^5.9.3",
-    "@cloudflare/workers-types": "^4.20260405.1"
-  },
+  "mcpName": "io.github.pipeworx-io/fl-medical-exclusions",
   "pipeworx": {
-    "sourceHash": "v1-3abb8577cb009d98a3ee6a5f493f32b56568b0ae6ba94af4e8a5c763f4a2b611",
-    "sourceCommit": "a03f96ed672b8c149593c64ecbf30280cabf084c"
+    "mode": "gateway",
+    "slug": "fl-medical-exclusions",
+    "gatewaySlug": "fl-medical-exclusions",
+    "sourceHash": "v1-8fa610196e45077e4efd75d4cecc1f1f2e2063eb075586af3ae528df0449beb4",
+    "sourceCommit": "bb047243cf27f32453103de186b8e6a8b6a1ce79"
   }
 }
